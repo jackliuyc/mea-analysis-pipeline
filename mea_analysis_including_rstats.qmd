@@ -1,0 +1,721 @@
+---
+title: "MEA analysis"
+jupyter: python3
+
+---
+
+## Overview
+
+This notebook provides an example analysis for resting state MEA or EEG data. This is using a jupyter notebook (could also work with a quarto notebook). This script uses the MNE python package (version 1.5.1) to load and store EEG data. Analyses were conducted using scipy (version 1.11.3) and mne-connectivity (version 0.5.0). The analyses presented here include resting state band power comparisons, power spectrum analyses, functional connectivity across epochs, and classification of connectivity data.
+
+## Data Characteristics
+
+The data used here is from the FORGE project. The mice are KO and WT groups, with ICV vehicle. Only recordings from day 1 were used. There are 31 mice total, with 16 KO and 15 WT. Data were preprocessed using the VHTP pipeline.
+
+
+```{python}
+#| output: false
+#| warning: false
+
+# import libraries
+import numpy as np
+import pandas as pd
+import mne 
+import matplotlib.pyplot as plt
+import os
+
+import glob
+
+# print loaded packages
+print(mne.sys_info())
+
+```
+
+
+## Loading Data
+
+EEG data are stored as .set files. To load data, first load the log of all EEG files. The subject log contains condition/group information and file name for each recording. Files paths can be read from the log or from a directory. The EEG files are loaded as an MNE data structure (mne.io.eeglab.eeglab.EpochsEEGLAB). 
+
+Loading EGI/EEGLAB data into the MNE structure does not preserve a lot of metadata. VHTP structure is lost, including including result and QA tables. Channel locations are unavailable, though this may be because channel locations were not included in the original .set files. Recording information including filepath, filename, eegid, and group is manually added to the mne.info structure. 
+
+
+## Load Subject Log and EEG Data
+
+```{python}
+#| output: false
+#| warning: false
+
+# set wd
+os.chdir('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/')
+
+
+# load subject log
+groupkey = pd.read_csv('forge_eeg_log.csv')
+
+
+# load EEG data
+data_folder = ('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/data/')
+file_list = glob.glob(data_folder + '*.set')
+
+
+# array of all EEG files
+EEGARR = []
+    
+
+# loop through file list 
+for cur_filepath in file_list:
+    
+    # get current file name 
+    cur_filename = os.path.basename(cur_filepath)
+    #print(cur_filename)
+
+    # read eeg
+    cur_eeg = mne.io.read_epochs_eeglab(cur_filepath, verbose = False)
+    
+    # get eeg info from log 
+    cur_line = groupkey[groupkey["filename"] == cur_filename]
+    if(cur_line.shape[0] != 1):
+        raise Exception("EEG file does not match eeg log") 
+
+
+    # set eeg info in mne structure
+    cur_eeg.info.filepath = cur_filepath
+    cur_eeg.info.filename = cur_filename
+    cur_eeg.info.eegid = cur_line['mouse_id'].item()
+    cur_eeg.info.group = cur_line["group"].item()
+    
+
+
+    # add current eeg to array 
+    EEGARR.append(cur_eeg)
+
+
+# check length 
+print(len(EEGARR))
+
+```
+
+
+### Calculating Band Power
+
+Power spectrum density calculated using Welch's method. The output of the power function includes both band averaged and power spectrum data. 
+
+Currently, power is calculated for each epoch, and power is averaged across epochs (appears to be the standard for MNE). It is also possible to join the epoched EEG data into continuous data and calculate power across the entire time series. For the current figures, power was averaged across all channels. 
+
+
+```{python}
+#| output: false
+#| warning: false
+
+# function for calculating band power 
+def eeg_htpCalcRestPower(
+    EEG, 
+    windowLengthSeconds = 1, 
+    bandDefs = {
+        'theta': [3.5, 7.5], 
+        'alpha': [8, 13], 
+        'beta': [13, 30],
+        'gamma1': [30, 55],
+        'gamma2': [65, 80]
+    },
+):
+
+
+    from scipy.signal import welch 
+    from scipy.signal import get_window
+
+
+    # get info from current EEG
+    dat = EEG.get_data()
+    sfreq = EEG.info['sfreq']
+    eegid = str(EEG.info.eegid)
+    chans = EEG.info['ch_names']
+
+
+    # calculate window length in samples
+    windowLengthSamples = windowLengthSeconds * sfreq
+
+    # calculate power with scipy welch (default window = 1 sec, overlap = 50%)
+    freqs, psds = welch(
+        x = dat, 
+        fs = sfreq, 
+        window = get_window('hann', int(windowLengthSamples)),
+        noverlap = windowLengthSamples // 2, 
+    )
+
+
+    # power absolute (averaged across epochs) 
+    pow_abs = np.mean(psds, axis = 0)
+
+    # power decibels
+    pow_db = 10 * np.log10(pow_abs) 
+
+    # power relative
+    pow_rel = pow_abs / np.sum(pow_abs, axis = 1)[:, np.newaxis]
+
+
+    # for some reason this is faster than 1 line of list comprehension + zip(* ... )
+    n_chan = pow_abs.shape[0]
+    n_freq = pow_abs.shape[1]
+    freq_col = [freqs[freq_i] for chan_i in range(n_chan) for freq_i in range(n_freq)]
+    chan_col = [chans[chan_i] for chan_i in range(n_chan) for freq_i in range(n_freq)]
+
+
+    # convert to long format
+    pow_abs_col = pow_abs.flatten()
+    pow_rel_col = pow_rel.flatten()
+    pow_db_col = pow_db.flatten()
+
+
+    # join columns into data frame
+    longdf = pd.DataFrame({
+        'eegid' : eegid,
+        'chan' : chan_col, 
+        'freq' : freq_col,
+        'power_abs' : pow_abs_col,
+        'power_rel' : pow_rel_col,
+        'power_db' : pow_db_col
+    })
+
+
+    # assign frequency bands
+    longdf['freq_band'] = None
+
+    for key in bandDefs:
+
+        lowfreq = bandDefs[key][0]
+        highfreq = bandDefs[key][1]
+
+        freq_band_mask = (longdf['freq'] > lowfreq) & (longdf['freq'] <= highfreq)
+
+        longdf.loc[freq_band_mask, 'freq_band'] = key
+
+
+
+    # get rid of frequencies not defined in bandDefs
+    longdf = longdf[longdf['freq_band'].notnull()]
+
+
+    # reorder columns
+    longdf = longdf.reindex(columns = ['eegid', 'chan', 'freq_band', 'freq', 'power_abs', 'power_rel', 'power_db'])
+
+
+    # average into frequency bands
+    grouped_data = longdf.groupby(['eegid', 'chan', 'freq_band'])
+    bandavg = grouped_data.agg({
+        # 'eegid':'first',
+        # 'chan':'first', 
+        # 'freq_band':'first',
+        'power_abs':'mean', 
+        'power_rel':'mean', 
+        'power_db':'mean'
+    })
+
+
+    return bandavg.reset_index(), longdf 
+
+```
+
+
+```{python}
+#| output: false
+#| warning: false
+
+# calculate power for all subjects
+
+bandDefs = {
+    'theta': [3.5, 7.5], 
+    'alpha': [8, 13], 
+    'beta': [13, 30],
+    'gamma1': [30, 55],
+    'gamma2': [65, 80]
+}
+
+
+df_bandpower = pd.DataFrame()
+df_spect = pd.DataFrame()
+
+for curEEG in EEGARR:
+
+    print(curEEG.info.eegid)
+
+    cur_bandpower, cur_spect = eeg_htpCalcRestPower(
+        EEG = curEEG, 
+        windowLengthSeconds = 1,
+        bandDefs = bandDefs
+    )
+
+    cur_bandpower['group'] = curEEG.info.group
+    cur_spect['group'] = curEEG.info.group
+
+    df_bandpower = pd.concat([df_bandpower, cur_bandpower])
+    df_spect = pd.concat([df_spect, cur_spect])
+
+
+# save results as csv
+results_folder = ('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/results/')
+df_bandpower.to_csv(results_folder + 'bandpower.csv')
+df_spect.to_csv(results_folder + 'powerspect.csv')
+```
+
+
+## Band Power Group Comparisons
+
+Statistic analyses are all performed in R (version 4.3.1). Band power is averaged across all channels for each subject. Average band power is compared across groups using t tests. FDR correction for multiple comparisons is applied. 
+
+
+
+```{r}
+#| output: true
+#| warning: false
+
+# load packages 
+pacman::p_load(tidyverse, rstatix, ggplot)
+
+
+# set wd
+setwd('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/')
+
+
+
+# join atlas
+mea_atlas = read_csv('mea_atlas.csv') %>%
+    mutate(chan = paste0('E', as.character(chan))) %>%
+    select(chan, network) %>%
+    rename(region = network)
+
+df_bandpower = read_csv('./results/bandpower.csv') %>%
+
+    left_join(mea_atlas, by = c("chan" = "chan")) %>%
+
+    select(eegid, group, chan, region, freq_band, power_abs, power_rel, power_db)
+
+
+
+# average across regions
+df_bandpower_summary = df_bandpower %>%
+    group_by(eegid, group, region, freq_band) %>%
+    summarise(power_abs = mean(power_abs)) %>%
+
+    ungroup() 
+
+
+# t test results
+df_bandpower_result = df_bandpower_summary %>%
+    
+    group_by(region, freq_band) %>%
+    rstatix::t_test(power_abs ~ group) %>%
+    adjust_pvalue(method = "fdr")
+
+
+
+# display and save t test results
+df_bandpower_result
+
+
+df_bandpower_result %>%
+    write_csv('./results/bandpower_ttest_results.csv')
+
+```
+
+
+
+## Band Power and Power Spectrum Figures
+
+For figures, band power and spectrogram was averaged across channels for each recording. Plots are created using R (version 4.3.1) and ggplot. For the spectrogram plot, ribbons/bands represent standard error of mean. 
+
+
+```{r}
+
+# custom ggplot theme
+source("https://raw.githubusercontent.com/jackliuyc/ggplot_theme_Publication/master/ggplot_theme_Publication-2.R")
+
+
+# create plot
+plt_bandpower <- df_bandpower_summary %>%
+    ggplot(aes(x = region, fill = group, y = power_abs)) +
+
+    geom_boxplot() + 
+
+    facet_wrap(~freq_band, scales = "free") +
+
+    theme_Publication() + 
+
+    ggtitle("Absolute band power group differences")
+
+
+plt_bandpower
+
+ggsave('./results/band_power_groupdiff_boxplot.png', plt_bandpower)
+
+```
+
+
+
+```{r}
+|#| output: true
+#| warning: false
+
+methods = c('power_abs', 'power_rel', 'power_db')
+
+df_powerspect <- read_csv('./results/powerspect.csv') %>%
+
+    left_join(mea_atlas, by = c("chan" = "chan")) %>%
+
+    group_by(eegid, group, region, freq) %>%
+    summarise(power_rel = mean(power_rel)) %>%
+
+    ungroup() %>%
+
+    group_by(group, region, freq) %>%
+    summarise(mean = mean(power_rel),
+        confint = sd(power_rel) * 1.96, 
+        se = sd(power_rel) / sqrt(n()))
+
+
+
+plt_powerspect <- df_powerspect %>%
+    ggplot() + 
+    geom_line(aes(
+        x = freq, 
+        y = mean, 
+        color = group
+    )) + 
+    geom_ribbon(aes(
+        x = freq, 
+        y = mean,
+        ymin = mean - se, 
+        ymax = mean + se,
+        fill = group
+    ), alpha = 0.2) + 
+
+    facet_wrap(~region, ncol = 1) +
+
+    theme_Publication() + 
+    ggtitle('Relative power spectrum')
+
+
+plt_powerspect
+ggsave('./results/power_spectrum.png', plt_powerspect)
+
+    
+
+```
+
+
+
+
+
+## Connectivity Calculations
+
+Methods used for calculating functional connectivity include spectral coherence (coh), directed phase lag index (dpli), and debiased weighted phase lag index 'wpli2_debiased'. Connectivity was calculated across epochs, not time, because data are epoched. 
+
+Connectivity is calculated using the mne-connectivity package. The function outputs a long table of values for each electrode pair, method, and frequency. The second output is a dense connectivity matrix of the connections (stored in a tuple for each method).
+
+
+```{python}
+#| output: false
+#| warning: false
+
+# function for calculating connectivity matrix 
+def calcConnectivityMatrix(epochs, method, banddefs):
+
+    from mne_connectivity import spectral_connectivity_epochs
+
+
+    # frequency band names
+    bandnames = list(banddefs.keys())
+
+    # final data table column names
+    colnames = ['eegid', 'method', 'chan1', 'chan2'] + bandnames
+
+
+    # get frequency min and max
+    flims = [(values[0], values[1]) for values in banddefs.values()]
+    fmin, fmax = zip(*flims)
+
+
+    # calculate connectivity 
+    con = spectral_connectivity_epochs(epochs, 
+                                       method = method,
+                                       sfreq = epochs.info['sfreq'], 
+                                       fmin=fmin,
+                                       fmax=fmax,
+                                       faverage=True)
+
+
+
+
+    # EEG file name
+    curfilename = epochs.info.eegid
+
+
+    # initialize result table
+    resultTable = pd.DataFrame(columns = colnames)
+    
+    # loop through methods
+    for index, curresult in enumerate(con): 
+    
+    
+    
+       # get current result
+        curarray = curresult.get_data(output = "raveled")
+        curdataframe = pd.DataFrame(curarray, columns = bandnames)
+        
+        
+    
+        # create channel columns
+        ch1col = np.repeat(np.arange(1,31), 30)
+        ch2col = np.tile(np.arange(1,31), 30)
+        curdataframe['chan1'] = ch1col
+        curdataframe['chan2'] = ch2col
+        
+        
+        # add eegid and measures column
+        curdataframe['eegid'] = curfilename
+        curdataframe['method'] = measures[index]
+
+
+        curdataframe = curdataframe.reindex(colnames, axis = 1)
+
+        resultTable = pd.concat([resultTable, curdataframe])
+
+    return resultTable, con
+
+```
+
+
+```{python}
+#| output: false
+#| warning: false
+
+
+# connectivity measures to calculate
+measures = ['coh', 'wpli', 'wpli2_debiased']
+
+# band definitions to calculate connectivity across
+bandDefs = {
+    'theta': [3.5, 7.5], 
+    'alpha': [8, 13], 
+    'beta': [13, 30],
+    'gamma1': [30, 55],
+    'gamma2': [65, 80]
+}
+
+
+# connectivity for each EEG
+df_connectivity = pd.DataFrame()
+for cureeg in EEGARR:
+
+    curdf = calcConnectivityMatrix(cureeg, measures, bandDefs)[0]
+
+    curdf['group'] = cureeg.info.group
+
+    df_connectivity = pd.concat([df_connectivity, curdf])
+
+
+df_connectivity.to_csv('./results/connectivityresults.csv')
+
+```
+
+
+## Connectivity Results
+
+
+```{r}
+#| output: false
+#| warning: false
+
+
+df_conn <- read_csv('./results/connectivityresults.csv') %>%
+
+    filter(method == 'wpli2_debiased') %>%
+    select(eegid, group, chan1, chan2, gamma1)
+
+df_connstats <- df_conn %>%
+   
+    group_by(chan1, chan2) %>%
+
+    rstatix::t_test(formula = gamma1 ~ group) %>%
+    rstatix::adjust_pvalue(method = "fdr")
+  
+```
+
+```{r}
+#| output: true
+#| warning: false
+
+plt_conmat = df_connstats %>%
+    select(chan1, chan2, statistic) %>%
+
+    ggplot() +
+    geom_tile(aes(x = chan1, y = chan2, fill = statistic)) +
+
+    scale_fill_gradient2(low = "cyan", mid = "white", high = "magenta") +
+
+    theme_Publication() +
+
+    theme(aspect.ratio = 1) +
+
+    ggtitle("T-test statistic KO-WT")
+
+
+ggsave('./results/plt_conmat.png', plt_conmat)
+
+```
+
+
+
+
+```{r}
+#| output: true
+#| warning: false
+
+pacman::p_load(brainconn)
+
+# select only significant connections
+df.onlysigvalues <- df_connstats %>%
+  
+  mutate(statistic = ifelse(is.na(statistic), 0, statistic), 
+         p = ifelse(is.na(p), 1, p)) %>%
+  
+  
+  mutate(value = ifelse(p > 0.05, 0, statistic)) %>%
+  
+  
+  select(chan1, chan2, value) 
+  
+  
+# pivot wider to get connectivity matrix
+df.wide <- df.onlysigvalues %>% 
+  pivot_wider(values_from = value, 
+              names_from = chan2) 
+  
+
+# get row names for later
+row_names = df.wide$chan1
+
+# create data frame for brainconn
+dataframe_forbrainconn <- df.wide %>%
+  select(-chan1) %>%
+  as.data.frame()
+
+# set row names
+rownames(dataframe_forbrainconn) <- row_names
+
+
+
+
+# brain atlas 
+batlas <- read_csv('./files_for_brainconn/batlas_fromkyle.csv') %>%
+#   mutate(ROI.Name = index, 
+#          x.mni = as.integer(x),
+#          y.mni = as.integer(y),
+#          z.mni = as.integer(z)) %>%
+  
+    mutate(x.mni = (x.mni * 18 + 3) * -1, 
+           y.mni = y.mni * 12 + 7)
+
+  select(ROI.Name, x.mni, y.mni, z.mni, network, hemi, index)
+
+
+
+# remove row and col names
+finalmat<- dataframe_forbrainconn
+rownames(finalmat) <- NULL
+colnames(finalmat) <- NULL
+
+
+
+
+
+# brainconn plot
+brainconn(atlas= batlas,  
+                     conmat=finalmat, all.nodes = T,
+                     view="top", node.size = 6, 
+                     background = "./files_for_brainconn/mea_background_light.png",
+                     edge.width = 2,
+                     edge.color.weighted = T,
+                     labels = F,
+                     label.size = 3) +
+  scale_edge_colour_gradient2(low='blue', mid='white', high='red') 
+
+```
+
+
+
+## Inter- and Intra-hemispheric Connectivity
+
+Replicating Dr. Jeffrey Rumschlag's 
+
+
+```{r}
+#| output: true
+#| warning: false
+
+
+
+mea_atlas_hemi = read_csv('mea_atlas.csv') %>%
+    mutate(chan = paste0('E', as.character(chan))) %>%
+    select(chan, hemi) 
+
+df_conn_hemi = df_conn %>%
+
+    mutate(chan1 = paste0('E', as.character(chan1)), 
+        chan2 = paste0('E', as.character(chan2))) %>%
+
+    left_join(mea_atlas_hemi, by = c('chan1' = 'chan')) %>%
+    rename(chan1_hemi = hemi) %>%
+
+    left_join(mea_atlas_hemi, by = c('chan2' = 'chan')) %>%
+    rename(chan2_hemi = hemi) %>%
+  
+
+    mutate(connectionType = ifelse(chan1_hemi == chan2_hemi, 'intrahemispheric', 'interhemispheric'))
+
+
+
+
+
+df_conn_hemi_avg = df_conn_hemi %>%
+
+    group_by(eegid, group, connectionType) %>%
+    
+    summarise(gamma1 = mean(gamma1)) %>%
+
+    ungroup() %>%
+
+    group_by(connectionType) 
+    
+    
+df_conn_hemi_avg %>%
+
+    rstatix::t_test(formula = gamma1 ~ group) %>%
+    rstatix::adjust_pvalue(method = "fdr") %>%
+
+    write_csv('./results/inter_vs_intrahemispheric_connectivity_results.csv')
+
+
+# plt_hemiconn = asdf
+
+# df_conn_hemi_avg %>%
+
+
+plt_hemiconn = df_conn_hemi_avg %>%
+
+    ggplot(aes(x = connectionType, fill = group, y = gamma1)) +
+
+    geom_boxplot() + 
+
+
+    theme_Publication() + 
+
+    ggtitle("DWPLI interhemispheric and intrahemispheric")
+
+
+plt_hemiconn
+
+ggsave('./results/interIntraHemisphericDWPLI.png', plt_hemiconn)
+
+```
+
