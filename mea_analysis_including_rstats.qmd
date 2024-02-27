@@ -45,17 +45,29 @@ Loading EGI/EEGLAB data into the MNE structure does not preserve a lot of metada
 #| output: false
 #| warning: false
 
+# directories
+working_dir = '//10.154.3.172/cblstore/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/'
+data_dir = '//10.154.3.172/cblstore/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/data/'
+results_dir = working_dir + 'results/'
+
+
+```
+
+
+```{python}
+#| output: false
+#| warning: false
+
+
 # set wd
-os.chdir('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/')
+os.chdir(working_dir)
 
 
 # load subject log
 groupkey = pd.read_csv('forge_eeg_log.csv')
 
-
 # load EEG data
-data_folder = ('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/data/')
-file_list = glob.glob(data_folder + '*.set')
+file_list = glob.glob(data_dir + '*.set')
 
 
 # array of all EEG files
@@ -253,9 +265,8 @@ for curEEG in EEGARR:
 
 
 # save results as csv
-results_folder = ('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/results/')
-df_bandpower.to_csv(results_folder + 'bandpower.csv')
-df_spect.to_csv(results_folder + 'powerspect.csv')
+df_bandpower.to_csv(results_dir + 'bandpower.csv')
+df_spect.to_csv(results_dir + 'powerspect.csv')
 ```
 
 
@@ -263,18 +274,27 @@ df_spect.to_csv(results_folder + 'powerspect.csv')
 
 Statistic analyses are all performed in R (version 4.3.1). Band power is averaged across all channels for each subject. Average band power is compared across groups using t tests. FDR correction for multiple comparisons is applied. 
 
+```{r}
 
+install.packages("pacman")
+
+
+install.packages("remotes")
+remotes::install_github("sidchop/brainconn")
+
+
+pacman::p_load(tidyverse, rstatix, ggplot, brainconn)
+
+
+```
 
 ```{r}
 #| output: true
 #| warning: false
 
-# load packages 
-pacman::p_load(tidyverse, rstatix, ggplot)
-
-
 # set wd
-setwd('/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/')
+working_dir = '//10.154.3.172/cblstore/srv/Analysis/Jack_Projects/#MEA_for_UCR_clean/'
+setwd(working_dir)
 
 
 
